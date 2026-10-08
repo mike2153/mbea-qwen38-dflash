@@ -1,0 +1,150 @@
+diff --git a/available_memory.py b/available_memory.py
+new file mode 100644
+index 0000000..94ff276
+--- /dev/null
++++ b/available_memory.py
+@@ -0,0 +1,45 @@
++"""Choose a startup VRAM budget from free memory, leaving desktop headroom.
++
++On Windows/WSL the desktop (dwm, browsers) holds 0.8-2.8 GiB of the R9700 and that changes
++between starts, so a fixed --gpu-memory-utilization either wastes context or overcommits and
++pages through host memory. This reads free VRAM at startup and budgets from that instead.
++
++Knobs: VRAM_RESERVE_GIB (default 1.5) is left free for Windows; VRAM_CAP (default 0.90) caps
++the fraction of the card vLLM may take. 1.0 / 0.95 reaches the model's 262k context.
++"""
++import math
++import os
++import sys
++
++
++def memory_fraction(free, total, reserve=1536 * 1024**2, cap=0.90):
++    if not 0 < free <= total or not 0 < cap < 1 or reserve <= 0:
++        raise ValueError("Invalid GPU memory reading or budget policy")
++    budget = min(free - reserve, total * cap)
++    if budget <= 0:
++        raise ValueError("Insufficient free VRAM after reserving desktop headroom")
++    return math.floor(budget / total * 10000) / 10000
++
++
++def main():
++    import torch
++
++    reserve_gib = float(os.environ.get("VRAM_RESERVE_GIB", "1.5"))
++    cap = float(os.environ.get("VRAM_CAP", "0.90"))
++    torch.cuda.init()
++    free, total = torch.cuda.mem_get_info(0)
++    fraction = memory_fraction(free, total, int(reserve_gib * 1024**3), cap)
++    args = sys.argv[1:]
++    index = args.index("--gpu-memory-utilization")
++    args[index + 1] = str(fraction)
++    print(
++        f"[memory-budget] free={free / 1024**3:.2f} GiB "
++        f"total={total / 1024**3:.2f} GiB reserve={reserve_gib:.2f} GiB cap={cap} "
++        f"budget={fraction * total / 1024**3:.2f} GiB utilization={fraction}",
++        flush=True,
++    )
++    os.execv("/opt/radiance_entrypoint.sh", ["/opt/radiance_entrypoint.sh", *args])
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/patch_wsl_dxg.py b/patch_wsl_dxg.py
+new file mode 100644
+index 0000000..65f005f
+--- /dev/null
++++ b/patch_wsl_dxg.py
+@@ -0,0 +1,72 @@
++#!/usr/bin/env python3
++"""Let vLLM identify ROCm through HIP when AMD-SMI is unavailable under WSL/ROCDXG."""
++import sysconfig
++from pathlib import Path
++
++from _patchlib import apply
++
++
++def main():
++    platforms = Path(sysconfig.get_paths()["purelib"]) / "vllm/platforms/__init__.py"
++    anchor = (
++        "    except Exception as e:\n"
++        '        logger.debug("ROCm platform is not available because: %s", str(e))\n'
++        "\n"
++        '    return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None\n'
++    )
++    replacement = (
++        "    except Exception as e:\n"
++        '        logger.debug("ROCm platform is not available through AMD-SMI because: %s", str(e))\n'
++        "        # ROCDXG exposes HIP through /dev/dxg, but AMD-SMI support is intentionally\n"
++        "        # limited on WSL. Confirm the ROCm build and a working HIP device instead.\n"
++        "        import os as _radiance_os\n"
++        '        if _radiance_os.environ.get("RADIANCE_WSL_DXG", "0") == "1":\n'
++        "            import torch as _radiance_torch\n"
++        "            is_rocm = (\n"
++        "                _radiance_torch.version.hip is not None\n"
++        "                and _radiance_torch.cuda.is_available()\n"
++        "            )\n"
++        "\n"
++        '    return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None\n'
++    )
++    apply(
++        platforms,
++        anchor,
++        replacement,
++        "RADIANCE_WSL_DXG",
++        "ROCm platform detection: HIP fallback for WSL/ROCDXG",
++    )
++
++    # Pinned memory under ROCm/WSL. CudaPlatformBase.is_pin_memory_available() honors
++    # VLLM_WSL2_ENABLE_PIN_MEMORY, but RocmPlatform does not override the base method, so on
++    # ROCDXG the answer is always "no" and every host<->device copy is pageable and synchronous.
++    # Measured on this box (R9700, WSL2 kernel 6.18, ROCDXG): one 4-byte H2D copy costs ~17 ms --
++    # the copy drains the stream -- and the MTP speculative path issues ~40 of them per decode
++    # step, which is ~600 ms/step (6.5 tok/s) with the GPU idle for most of it. With pinned
++    # memory the same copy is asynchronous: 8 MiB measured 1.49 ms against 3.02 ms pageable.
++    iface = Path(sysconfig.get_paths()["purelib"]) / "vllm/platforms/interface.py"
++    pin_anchor = (
++        "            logger.warning(\n"
++        '                "Using \'pin_memory=False\' as WSL is detected. "\n'
++        '                "This may slow down performance."\n'
++        "            )\n"
++        "            return False\n"
++    )
++    pin_replacement = pin_anchor.replace(
++        "            return False\n",
++        '            import os as _radiance_os\n'
++        '            if _radiance_os.environ.get("VLLM_WSL2_ENABLE_PIN_MEMORY", "0") == "1":\n'
++        "                return True\n"
++        "            return False\n",
++    )
++    apply(
++        iface,
++        pin_anchor,
++        pin_replacement,
++        "VLLM_WSL2_ENABLE_PIN_MEMORY\", \"0\") == \"1\"",
++        "WSL pin_memory: honor VLLM_WSL2_ENABLE_PIN_MEMORY on non-CUDA platforms (ROCm/ROCDXG)",
++    )
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/radiance_drafthead.py b/radiance_drafthead.py
+index 55bb31e..e5fadfa 100644
+--- a/radiance_drafthead.py
++++ b/radiance_drafthead.py
+@@ -211,7 +211,15 @@ def _head_matrix(lm_head):
+ 
+ def _head_is_empty(rows, scale):
+     if scale is None:
+-        return float(rows.data.abs().max()) == 0.0
++        # Keep the original reduction/errors for empty or unsupported tensor forms.
++        data = rows.data
++        if (data.dim() != 2 or data.numel() == 0 or data.layout != torch.strided
++                or data.dtype not in (torch.bfloat16, torch.float16, torch.float32, torch.float64)):
++            return float(data.abs().max()) == 0.0
++        for i in range(0, data.shape[0], 8192):
++            if float(data[i:i + 8192].abs().max()) != 0.0:
++                return False
++        return True
+     for i in range(0, rows.shape[0], 8192):          # fp8 has no abs(); bytes are enough
+         if bool((rows.data[i:i + 8192].view(torch.uint8) != 0).any()):
+             return False

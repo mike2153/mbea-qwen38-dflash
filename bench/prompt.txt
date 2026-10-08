@@ -1,0 +1,143 @@
+Implement a deterministic, dependency-aware task lease scheduler in one Rust 2024
+library file, lib.rs. Use only std; no Cargo dependencies, unsafe, external files,
+I/O (including printing), network, processes, threads, clocks, randomness, or global
+mutable state. All time is supplied by the caller. Do not include other source
+files. Return ONLY the complete Rust source, without Markdown, tests, explanatory
+prose, or a reasoning transcript. The answer budget is 8,000 output tokens. A clear
+solution should fit approximately 200-300 lines; length is not graded.
+
+The library will be compiled separately using:
+  rustc --edition=2024 -D warnings --crate-type lib --crate-name lease_scheduler lib.rs
+Independent external tests exercise only the following public API and contract.
+No extra traits, methods, error messages, complexity targets, or formatting rules
+are required. Do not suppress compiler warnings. Small linear scans are fine.
+
+PUBLIC API (keep names, fields, types, signatures, and required traits exactly):
+
+pub type TaskId = u32;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Task {
+    pub id: TaskId,
+    pub priority: i32,
+    pub dependencies: Vec<TaskId>,
+    pub max_attempts: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lease {
+    pub task_id: TaskId,
+    pub token: u64,
+    pub attempt: u32,
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State { Pending, Leased, Succeeded, Failed }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Error {
+    InvalidLeaseDuration,
+    InvalidGraph,
+    TimeWentBackwards,
+    TimeOverflow,
+    UnknownTask,
+    StaleLease,
+}
+
+#[derive(Debug)]
+pub struct Scheduler { /* your private fields */ }
+
+impl Scheduler {
+    pub fn new(tasks: Vec<Task>, lease_duration: u64) -> Result<Self, Error>;
+    pub fn claim(&mut self, now: u64) -> Result<Option<Lease>, Error>;
+    pub fn finish(&mut self, task_id: TaskId, token: u64, success: bool, now: u64)
+        -> Result<(), Error>;
+    pub fn advance(&mut self, now: u64) -> Result<(), Error>;
+    pub fn state(&self, task_id: TaskId) -> Option<State>;
+    pub fn attempts(&self, task_id: TaskId) -> Option<u32>;
+    pub fn now(&self) -> u64;
+}
+
+CONTRACT
+
+A. Construction and graph validation
+- lease_duration is shared by all tasks and must be positive. Zero returns
+  InvalidLeaseDuration before any graph validation, even for an invalid graph.
+- Return InvalidGraph for duplicate task IDs, zero max_attempts, missing dependency
+  IDs, repeated IDs within a single task's dependencies, or any directed cycle
+  (including a self-dependency or a cycle in a disconnected component).
+- dependencies lists immediate prerequisites, not children. Forward references,
+  unsorted input, shared prerequisites, transitive/redundant edges, disconnected
+  DAGs, and the empty task list are valid. IDs 0 and u32::MAX and all i32 priorities
+  are valid. Dependency list order and task input order have no scheduling effect.
+- Successful construction sets the clock to 0, all states to Pending, all attempt
+  counts to 0, and the global issued-token count to 0. Tasks are never added later.
+- Tests use at most 128 tasks per scheduler and at most 10,000 operations per test.
+  Within these bounds, a u64 token counter cannot overflow; handling token
+  exhaustion beyond these bounds is not required. All other integer boundaries
+  mentioned in this contract, including time overflow, are in scope.
+
+B. State, dependencies, and attempts
+- Only a Pending task with EVERY dependency Succeeded is eligible to be claimed.
+  A task without dependencies is eligible when Pending. Leased, Succeeded, and
+  Failed tasks are never eligible. Pending includes dependency-blocked tasks.
+- A claim consumes ONE attempt; the returned attempt is the task's new 1-based
+  attempt count. max_attempts is the TOTAL number of permitted claims, including
+  the first, not the number of retries. Only successful claims increment counts.
+- Successful completion changes a leased task to Succeeded, permanently.
+- Failed completion or lease expiry changes it to Pending if attempts is still
+  less than max_attempts; otherwise it changes to Failed, permanently.
+- No retry delay, backoff, automatic claim, or failure propagation occurs.
+  In particular, a failed prerequisite leaves descendants Pending but blocked
+  forever; failure/expiry alone NEVER satisfies a dependency. Other independent
+  tasks can still run. Retried tasks retain their original priority/dependencies.
+
+C. Clock and expiry
+- now() returns the stored clock. Initial clock 0 and equal timestamps are valid.
+- All three mutating methods first reject now < stored clock with
+  TimeWentBackwards. This error takes precedence over all other errors and leaves
+  EVERYTHING unchanged, including clock, states, attempts, and token allocation.
+- An expiry sweep sets the clock to now, then expires ALL active leases whose
+  expires_at <= now, using rule B. A lease is valid only while now < expires_at.
+  No additional attempts or tokens are consumed by sweeping. Repeated sweeps
+  never process an already-expired lease a second time.
+- advance(now) performs that sweep and returns Ok(()). It has no other validation
+  or effect and works at u64::MAX.
+- state(id) and attempts(id) are read-only snapshots at the stored clock; they
+  neither sweep nor change anything. They return None for an unknown ID.
+
+D. claim(now), with this exact ordering
+1. Reject backwards time as in C, with no mutation.
+2. Compute expires_at = now + lease_duration using checked addition. Overflow
+   returns TimeOverflow with NO mutation, BEFORE any sweep or eligibility check.
+   This applies even to an empty scheduler or when no task could be claimed.
+3. Sweep all expirations and update the clock as in C.
+4. Among all eligible tasks, choose greatest numeric priority, then smallest
+   numeric ID to break ties. Be correct for i32::MIN as well as i32::MAX.
+   If none is eligible, return Ok(None); the clock/sweep effects still persist.
+5. Increment that task's attempt count; issue the next globally sequential token
+   (1, 2, 3, ... across ALL tasks of this scheduler, never reused); mark it Leased
+   and record the token and expires_at; return Ok(Some(Lease { ... })). Each
+   scheduler has its own token sequence. Failed/no-work calls consume no token.
+   A lease that expired in step 3 can be retried in this same claim call, but at
+   most one task is claimed per call. There is no capacity or worker-ID limit.
+
+E. finish(task_id, token, success, now), with this exact ordering
+1. Reject backwards time as in C, with no mutation.
+2. Sweep ALL expirations and update the clock as in C, even if step 3 will fail.
+   finish does NOT calculate a new expiry and cannot return TimeOverflow.
+3. Unknown ID returns UnknownTask. For a known ID, return StaleLease unless it is
+   currently Leased AND the supplied token exactly matches that active lease.
+   Token 0, another task's token, an expired/replaced token, completion of an
+   unclaimed task, and repeated completion of a terminal task are all stale.
+   These errors preserve the sweep/clock effects but do not otherwise alter any
+   task, attempt count, or token counter. They never accept a stale success or
+   stale failure. A completion exactly at expires_at is already too late.
+4. For a valid active token, apply success/failure using B, invalidate that active
+   lease, and return Ok(()). Dependents can be claimed immediately at the SAME
+   timestamp after success. A retry after failure is also possible at that same
+   timestamp if attempts remain. Completion consumes no additional attempt.
+
+This is a small in-memory state machine, not a worker runtime or persistence
+framework. The contract above is the complete grading specification.
