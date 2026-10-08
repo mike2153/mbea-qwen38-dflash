@@ -10,6 +10,10 @@ A tuned, reproducible vLLM serving setup for one R9700 (RDNA4, gfx1201, 32 GB) u
 ![Decode](https://img.shields.io/badge/decode-125--134%20tok%2Fs-2EA44F)
 ![Context](https://img.shields.io/badge/context-216k%20%E2%80%93%20260k-2EA44F)
 
+![Demo: start, a real-time streamed Rust answer, and the benchmark](docs/demo.gif)
+
+<sub>Real output from one R9700. The code stream plays at its recorded speed (548 tokens, 170 tok/s; short answers with reasoning off decode faster than the long benchmark runs). The 166 s model load and the 5-minute benchmark are skipped. The generated code compiles and passes its own 3 tests.</sub>
+
 ---
 
 ## Performance
