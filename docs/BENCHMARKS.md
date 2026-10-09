@@ -54,9 +54,17 @@ Retrieval prompts. Prefill is the time to first token; decode is measured on the
 | + 1.0 GiB reserve / 0.95 cap (`-Long`) | 123.1 · 118.7 | +0.4 % | 62.8 % | 260,879 · 257,768 | 57.9 | 5 / 6 |
 | Reserve change only | 119.7 · 118.5 | −2.4 % | 59.9 % | 260,480 · 163,506 | 71.0 | 4 / 6 |
 | + `GPU_MAX_HW_QUEUES=2` | 129.9 · 127.5 | +6.0 % | 61.4 % | 216,480 · – | 57.5 | 4 / 6 |
-| + probabilistic drafting | 131.0 · 128.9 | +6.9 % | 60.2 % | 216,480 · – | 54.6 | 5 / 6 |
+| + probabilistic drafting (unfixed upstream code, see below) | 131.0 · 128.9 | +6.9 % | 60.2 % | 216,480 · – | 54.6 | 5 / 6 |
 
-The HW-queue and probabilistic-drafting variants fall inside the spread of the shipped profile, so they were not adopted.
+The HW-queue and probabilistic-drafting variants fall inside the spread of the shipped profile, so they were not adopted then.
+
+## 2026-10-09: lossless probabilistic drafting (now shipped)
+
+The 2026-10-08 probabilistic-drafting row used upstream code with three bugs, so its output was not exactly the target model's distribution: the walk sampled from softmax(scores / T) but stored the raw scores as q; its Gumbel noise used the same random key as the target's residual resample; and block verification reused its uniform draws across steps (biased even with greedy drafts). `patches/patch_dflash2_temperature.py` fixes all three. A numpy simulation of the kernels (4-token Markov target, 1.5M trials) gives chi-squared 42–58 on 63 degrees of freedom after the fixes, against 10,000–98,000 before, and temperature-0 output is bit-identical to greedy drafting. Shipped with `"draft_sample_method":"probabilistic","rejection_sample_method":"block"`.
+
+Short-prompt `bench` on the new profile: 125.7 greedy (120.4 · 125.7 · 133.3), **127.6 sampled** (137.2 · 127.0 · 127.6), 58.3 % / 61.5 % acceptance, KV pool 215,600. Long-context agent measurements: see the README section "Speed on real long-context agent work".
+
+Also tried on top of it and rejected: draft-selector top-k 32 (−62 %), draft temperature x0.8 (−3.6 %) and x1.25 (−7.1 %), prefill chunk 4,096 (+6.5 % prefill but 26k less context).
 
 ## Reproduce
 
