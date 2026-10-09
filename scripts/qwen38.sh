@@ -168,6 +168,7 @@ cmd_start() {
     --security-opt seccomp=unconfined --security-opt label=disable --cap-add SYS_PTRACE \
     --shm-size 64m "${GPU_ARGS[@]}" \
     -v "$DATA/radiance":/patches -v "$DATA/libr4d":/r4d:ro -v "$REPO/scripts/entry.sh":/entry.sh:ro \
+    -v "$REPO/patches/patch_dflash2_temperature.py":/patches/patch_dflash2_temperature.py:ro \
     -v "$MODELS":/models -v "$DATA/cache":/cache \
     --env-file "$REPO/config/dflash.env" -e VRAM_RESERVE_GIB -e VRAM_CAP \
     --entrypoint bash "$IMAGE" /entry.sh \
@@ -178,7 +179,7 @@ cmd_start() {
     --kv-cache-dtype fp8 --mamba-cache-dtype bfloat16 --mamba-ssm-cache-dtype float16 \
     --mamba-cache-mode align --enable-prefix-caching \
     --attention-backend R4D \
-    --speculative-config '{"method":"dflash","model":"/models/tcclaviger/Qwen3.8-27B-DFlash2-FP8","num_speculative_tokens":7,"attention_backend":"TRITON_ATTN","draft_sample_method":"greedy"}' \
+    --speculative-config '{"method":"dflash","model":"/models/tcclaviger/Qwen3.8-27B-DFlash2-FP8","num_speculative_tokens":7,"attention_backend":"TRITON_ATTN","draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
     --no-async-scheduling \
     --compilation-config '{"cudagraph_capture_sizes":[1,2,4,8,16,24,32,40],"pass_config":{"fuse_norm_quant":true,"fuse_act_quant":true}}' \
     --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 \

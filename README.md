@@ -1,6 +1,6 @@
 # mbea-qwen38-dflash
 
-**Qwen3.8-27B at 125–134 tokens/s with up to 260k context on a single AMD Radeon AI PRO R9700, running on Windows.**
+**Qwen3.8-27B at 125–134 tokens/s on short coding prompts (~85–95 tokens/s on long-context agent work) with up to 260k context on a single AMD Radeon AI PRO R9700, running on Windows.**
 
 A tuned, reproducible vLLM serving setup for one R9700 (RDNA4, gfx1201, 32 GB) under Windows 11 + WSL2. It uses AMD's official MXFP4 checkpoint, a DFlash2 speculative drafter and the RDNA4 kernels from [radiance](https://codeberg.org/ggz14/radiance-vllm-mxfp4). One command installs everything, one starts an OpenAI-compatible server.
 
@@ -24,10 +24,10 @@ Every number is a median of repeated runs on the shipped profile; method and raw
 | | Result |
 |---|---|
 | **Decode, greedy** | **125–134 tok/s** (medians of three separate starts) |
-| **Decode, sampled** (temp 0.7, top-p 0.95) | **117–126 tok/s** |
+| **Decode, sampled** (temp 0.7, top-p 0.95) | **127.6 tok/s** with lossless probabilistic drafting (was 117–126 with greedy drafts) |
 | **Prefill, 1.9k-token prompt** | **2,750–2,970 tok/s**, time to first token 0.66–0.70 s |
 | **Prefill, long prompts** | 32k in 10.9 s · 98k in 41 s · 164k in 83 s · 258k in 164 s |
-| **Decode deep in context** | 165 tok/s at 32k · 136 at 98k · 145 at 164k · 115 at 258k |
+| **Decode deep in context** | 165 tok/s at 32k · 136 at 98k · 145 at 164k · 115 at 258k on short fact-retrieval answers. Long reasoning-heavy agent turns run slower: see [real agent work](#speed-on-real-long-context-agent-work) |
 | **Context window** | ~216k tokens by default · **~260k with `-Long`** (the model's 262k limit) |
 | **Draft acceptance** | 59–63 % of drafted tokens · 5.1–5.4 tokens per verify step |
 | **Long-context recall** | 8/8 facts retrieved from a 257,768-token prompt |
@@ -42,6 +42,32 @@ A clean install from this repository, then `.\qwen38.ps1 bench`, reproduced the 
 | Coding task, sampled (x3) | 1,921 | 2,757 | 0.70 | 116.7 | 58.2% |
 | Long prompt (~32k) | 34,741 | 2,762 | 12.58 | 138.4 | - |
 
+After switching to lossless probabilistic drafting (2026-10-09, same box, `bench` against the running server):
+
+| Test | Prompt tokens | Decode tok/s | Draft acceptance |
+|---|---:|---:|---:|
+| Coding task, greedy (x3) | 1,922 | 125.7 | 58.3% |
+| Coding task, sampled (x3) | 1,925 | 127.6 | 61.5% |
+| Long prompt (~32k) | 34,747 | 126.6 | - |
+
+Greedy (temperature 0) runs take exactly the same path as before, so only the sampled number moves. Prefill is unchanged.
+
+### Speed on real long-context agent work
+
+The numbers above use short, predictable prompts. A coding agent working in a large codebase is harder to predict: it reasons
+about big files at 30k–180k tokens of context, so fewer drafted tokens are accepted per step (~4 instead of ~5.3) and each step
+reads more KV cache. Measured with paired prompts (same prompt and seed on both configurations) from a private C++ codebase
+(36k–180k-token prompts) plus replayed coding-agent turns, 6 seeds:
+
+| | Greedy drafts (before) | Probabilistic drafts (now) | Change |
+|---|---:|---:|---:|
+| Decode, all prompts (75 pairs) | 86.7 tok/s | 91.4 tok/s | **+5.5 %** |
+| Decode, 140k+ context (10 pairs) | 73.8 tok/s | 80.7 tok/s | **+9 %** |
+| End-to-end agent codebase review (one run each) | 20.8 s per 1k tokens written | 17.2 s | **17 % faster** |
+| Coding quality, 24 seeds x 46 tests | 15 / 24 perfect | 18 / 24 | no loss (within noise) |
+
+Single sampled prompts swing by ±20 % because the generated text diverges, so only paired averages over many prompts are meaningful.
+
 For reference, the same model in a tuned llama.cpp build (IQ4_XS GGUF, MTP + n-gram speculation) decodes at 52–68 tok/s on this card. That was measured with a different prompt, so treat it as a rough comparison.
 
 ### Where the speed comes from
@@ -50,6 +76,7 @@ For reference, the same model in a tuned llama.cpp build (IQ4_XS GGUF, MTP + n-g
 |---|---|
 | **DFlash2 drafter** ([tcclaviger/Qwen3.8-27B-DFlash2-FP8](https://huggingface.co/tcclaviger/Qwen3.8-27B-DFlash2-FP8)) drafts 7 tokens per step | ~5.3 tokens accepted per forward pass of the 27B model |
 | **Draft re-ranking + dedicated verify head** (`RADIANCE_DRAFT_RERANK=80`, `RADIANCE_VERIFY_HEAD=1`) | +7 % decode, acceptance unchanged |
+| **Lossless probabilistic drafting + block verification** ([`patches/patch_dflash2_temperature.py`](patches/patch_dflash2_temperature.py)) | +5.5 % on long-context agent work, +9 % at 140k+. Fixes three upstream DFlash2 bugs that made probabilistic drafting unsafe (draft probabilities stored without temperature, draft noise sharing the resample's random stream, block verification reusing its random numbers across steps). Output distribution stays exactly the target model's |
 | **MXFP4 weights through a hand-written W4A8 GEMM** for gfx1201 | 4-bit weights without vLLM's emulation path |
 | **libr4d** FP8 paged attention + gated-delta-net kernels (pinned `b9e42ab` + rx9 narrow-state patch) | the stock kernel NaNs this model; this one is fast and correct |
 | **WSL pinned-memory fix** | host→device copies become async (a 4-byte copy cost ~17 ms before) |
@@ -170,6 +197,7 @@ scripts/entry.sh              runs inside the container: patch chain, kernel bui
 scripts/fix_checkpoint.py     makes AMD's checkpoint loadable without rewriting weights
 config/dflash.env             the tuned engine profile
 patches/radiance-wsl-r9700.patch   local changes on top of the pinned radiance commit
+patches/patch_dflash2_temperature.py   lossless DFlash2 probabilistic drafting (applied at container start)
 bench/                        stdlib benchmark + the coding prompt used for the published numbers
 docs/BENCHMARKS.md            full measurements and method
 ```
