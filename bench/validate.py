@@ -79,7 +79,7 @@ def validate(base, control):
     status, result = request(base, '/v1/chat/completions', control,
                              {**body, 'max_tokens': 1024, 'chat_template_kwargs': {'enable_thinking': True}})
     message = result['choices'][0]['message']
-    check('thinking_and_answer', status == 200 and bool(message.get('reasoning_content'))
+    check('thinking_and_answer', status == 200 and bool(message.get('reasoning') or message.get('reasoning_content'))
           and '391' in (message.get('content') or ''))
     tool = {'type': 'function', 'function': {'name': 'multiply', 'description': 'Multiply two integers.',
             'parameters': {'type': 'object', 'properties': {'a': {'type': 'integer'}, 'b': {'type': 'integer'}},
