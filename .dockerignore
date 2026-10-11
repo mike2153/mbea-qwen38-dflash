@@ -1,0 +1,9 @@
+**
+!Dockerfile
+!patches/
+!patches/*.py
+!patches/*.json
+!patches/*.patch
+!scripts/
+!scripts/entry.sh
+!scripts/available_memory.py

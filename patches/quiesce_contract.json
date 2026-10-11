@@ -1,0 +1,27 @@
+{
+  "vllm/v1/engine/core.py": {
+    "EngineCoreProc": {
+      "pause_scheduler": "c1e3c5710b5b3da3213cfa5708a25b0dfc7c1a8c4e195b3f8e97ac5be0e7237d",
+      "_pause_complete": "253f003c8cac37a88322988be8cae95800e405962d0e9e6f73242c0ef4636caa",
+      "has_work": "5b1bd882fda37f2710e60d7d141b8a789738b5945eb1e7e54348466856043356",
+      "_notify_idle_state_callbacks": "c6622ef89866f780cf6e48746d78b6cc86df28b66164e5c06e06d5db920a48ce",
+      "_invoke_utility_method": "380b58b0548f771cf90b2524c054b08ce1933d1e485de471e21d3e1a9bf3bcf2",
+      "_process_input_queue": "3c98b3c694338d63a7d578d74931301574bf883332681a27c2183bbc0b5ecc30",
+      "_handle_client_request": "85de77f15f6fb0e8c53dfb1eaea6f53797b251beeba68a4cbf715b7be44ad731"
+    }
+  },
+  "vllm/v1/engine/async_llm.py": {
+    "AsyncLLM": {
+      "pause_generation": "e4eec664b5e76cd52105dffafd28019e118df843e30bb91230b9abacfe8ef1c7",
+      "is_paused": "1d5b211ea74ba1e55cb5810d040a061a932d75fadcdb29130ea6be39172553be",
+      "collective_rpc": "b2c99b02af02978ee4c9f3e8092262120724ae02707cd45e25790fdfded677f3"
+    }
+  },
+  "vllm/v1/core/sched/scheduler.py": {
+    "Scheduler": {
+      "finish_requests": "00c51bf0ecfa0170d7e2a7957ae0a671144e5c412424dab02bf518b27db09c7e",
+      "has_requests": "e21fda20f4e836c5b809e1ad8a86a4e68d1d8826a8cff960665c69af578b5a2c",
+      "get_num_unfinished_requests": "91ce0cb0324c827051666b23881fceeba25eb9e12a6d83cc5055ff9c08d82148"
+    }
+  }
+}

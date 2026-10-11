@@ -1,3 +1,8 @@
 __pycache__/
 *.pyc
 *.log
+runtime/
+reports/private/
+*.safetensors
+*.pt
+*.so

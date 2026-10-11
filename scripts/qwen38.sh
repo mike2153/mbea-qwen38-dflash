@@ -2,7 +2,7 @@
 # Qwen3.8 + DFlash on one AMD Radeon AI PRO R9700 under WSL2. Runs inside WSL as root.
 #
 #   qwen38.sh setup            one-time: deps, ROCDXG, image, models, kernels (~40 GB download)
-#   qwen38.sh start [--long]   start the server on :8080 (--long = 1.0 GiB reserve -> ~260k ctx)
+#   qwen38.sh start [--long]   start the server on :8080 (at least 180k context)
 #   qwen38.sh stop | status | logs
 set -euo pipefail
 
@@ -17,12 +17,14 @@ IMAGE=stilldeadcode/vllm-radiance@sha256:45694209177a55a1ab3ba6702fe6e978b1b66a6
 RADIANCE_REPO=https://codeberg.org/ggz14/radiance-vllm-mxfp4
 RADIANCE_COMMIT=7d9a15a51d83733cc079fcf32ef4e3ec6b04ad7a
 R4D_REPO=https://codeberg.org/StillDeadcode/libr4d.git
-R4D_PIN=b9e42ab
+R4D_PIN=b9e42ab7202f53a3bc13d415f5d41481f9ca311b
 MODEL_REPO=amd/Qwen3.8-27B-Quark-AWQ-MXFP4
 MODEL_REV=5233554c5fa56afda40150556b95573c2d7d29c0
 DRAFT_REPO=tcclaviger/Qwen3.8-27B-DFlash2-FP8
 DRAFT_REV=ee0cb26a8279b7910cc28d82a8a3e15e4728d56f
 ROCDXG_DEB=https://github.com/ROCm/librocdxg/releases/download/v1.2.2/rocdxg-roct_1.2.2_amd64.deb
+
+RUNTIME_IMAGE=mbea-qwen38-dflash:2026.10
 
 SNAP=$MODELS/Qwen3.8-27B-MXFP4-official
 SRC=$MODELS/$MODEL_REPO
@@ -101,18 +103,10 @@ print(f"  ok: {p.name}, {p.total_memory / 2**30:.1f} GiB, {p.gcnArchName}")
 assert "gfx1201" in p.gcnArchName, "this build targets gfx1201 (R9700) only"
 '
 
-  step "6/9  radiance runtime (pinned $RADIANCE_COMMIT)"
+  step "6/9  compile the pinned runtime image (CPU only)"
   mkdir -p "$DATA/cache"
-  if [ ! -d "$DATA/radiance/.git" ]; then
-    git clone -q "$RADIANCE_REPO" "$DATA/radiance"
-  fi
-  git -C "$DATA/radiance" checkout -q "$RADIANCE_COMMIT"
-  if git -C "$DATA/radiance" apply --reverse --check "$REPO/patches/radiance-wsl-r9700.patch" 2>/dev/null; then
-    ok "patch already applied"
-  else
-    git -C "$DATA/radiance" apply "$REPO/patches/radiance-wsl-r9700.patch"
-    ok "applied patches/radiance-wsl-r9700.patch"
-  fi
+  docker build --network host -t "$RUNTIME_IMAGE" "$REPO"
+  ok "runtime patches and HIP kernels compiled into $RUNTIME_IMAGE"
 
   step "7/9  models (~21 GB)"
   local repo rev dir
@@ -127,18 +121,9 @@ assert "gfx1201" in p.gcnArchName, "this build targets gfx1201 (R9700) only"
   done
   python3 "$REPO/scripts/fix_checkpoint.py" "$SRC" "$SNAP"
 
-  step "8/9  libr4d kernels ($R4D_PIN + rx9)"
-  if [ -f "$DATA/libr4d/r4d.so" ]; then
-    ok "already built"
-  else
-    rm -rf "$DATA/.r4d-build"
-    git clone -q "$R4D_REPO" "$DATA/.r4d-build"
-    git -C "$DATA/.r4d-build" checkout -q "$R4D_PIN"
-    git -C "$DATA/.r4d-build" apply "$DATA/radiance/r4d_radiance_extras_rx9.patch"
-    docker run --rm --entrypoint bash -v "$DATA/.r4d-build":/work -w /work "$IMAGE" -c ./build.sh
-    mv "$DATA/.r4d-build" "$DATA/libr4d"   # publish only after a successful build
-    ok "built"
-  fi
+  step "8/9  runtime package"
+  docker image inspect "$RUNTIME_IMAGE" >/dev/null
+  ok "pinned image present; no kernel compilation needed during start"
 
   step "9/9  first start (compiles Triton/inductor kernels into the cache, ~5-10 min)"
   # The compile run's autotuning buffers inflate vLLM's memory profile, so a cold start gets only
@@ -148,7 +133,7 @@ assert "gfx1201" in p.gcnArchName, "this build targets gfx1201 (R9700) only"
   elif [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = true ]; then
     touch "$DATA/cache/.warm"; ok "server is running, so the cache is already warm"
   else
-    cmd_start && cmd_stop && touch "$DATA/cache/.warm"
+    QWEN38_WARMUP=1 cmd_start && cmd_stop && touch "$DATA/cache/.warm"
   fi
 
   echo
@@ -156,22 +141,23 @@ assert "gfx1201" in p.gcnArchName, "this build targets gfx1201 (R9700) only"
 }
 
 cmd_start() {
-  [ "${1:-}" = --long ] && export VRAM_RESERVE_GIB=1.0 VRAM_CAP=0.95
-  [ -f "$DATA/libr4d/r4d.so" ] && [ -f "$SNAP/config.json" ] || die "not set up yet -- run: qwen38.sh setup"
+  [ "${1:-}" = --long ] && export VRAM_RESERVE_GIB=0.5 VRAM_CAP=0.95
+  docker image inspect "$RUNTIME_IMAGE" >/dev/null 2>&1 && [ -f "$SNAP/config.json" ] || die "not set up yet -- run: qwen38.sh setup"
   if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = true ]; then
+    python3 "$REPO/scripts/lifecycle.py" ready "$DATA" "$CONTAINER" "$PORT"
     ok "$CONTAINER is already running"; return 0
   fi
-  docker rm "$CONTAINER" >/dev/null 2>&1 || true
+  local control_env
+  control_env=$(python3 "$REPO/scripts/lifecycle.py" prepare "$DATA" "$CONTAINER" "$PORT")
   ! ss -ltn "sport = :$PORT" | grep -q LISTEN || die "port $PORT is already in use"
   gpu_args
-  docker run -d --name "$CONTAINER" --network host --ipc host --privileged \
+  docker run -d --name "$CONTAINER" --label io.mbea.qwen38.managed=1 --network host --ipc host --privileged \
     --security-opt seccomp=unconfined --security-opt label=disable --cap-add SYS_PTRACE \
     --shm-size 64m "${GPU_ARGS[@]}" \
-    -v "$DATA/radiance":/patches -v "$DATA/libr4d":/r4d:ro -v "$REPO/scripts/entry.sh":/entry.sh:ro \
-    -v "$REPO/patches/patch_dflash2_temperature.py":/patches/patch_dflash2_temperature.py:ro \
     -v "$MODELS":/models -v "$DATA/cache":/cache \
-    --env-file "$REPO/config/dflash.env" -e VRAM_RESERVE_GIB -e VRAM_CAP \
-    --entrypoint bash "$IMAGE" /entry.sh \
+    --env-file "$REPO/config/dflash.env" --env-file "$control_env" \
+    -e VRAM_RESERVE_GIB="${VRAM_RESERVE_GIB:-1.0}" -e VRAM_CAP="${VRAM_CAP:-0.95}" \
+    "$RUNTIME_IMAGE" \
     /models/Qwen3.8-27B-MXFP4-official \
     --served-model-name Qwen3.8-DFlash --host 0.0.0.0 --port "$PORT" \
     --tensor-parallel-size 1 --language-model-only \
@@ -181,10 +167,12 @@ cmd_start() {
     --attention-backend R4D \
     --speculative-config '{"method":"dflash","model":"/models/tcclaviger/Qwen3.8-27B-DFlash2-FP8","num_speculative_tokens":7,"attention_backend":"TRITON_ATTN","draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
     --no-async-scheduling \
+    --shutdown-timeout 30 --api-server-count 1 --middleware radiance_quiesce.ControlMiddleware \
     --compilation-config '{"cudagraph_capture_sizes":[1,2,4,8,16,24,32,40],"pass_config":{"fuse_norm_quant":true,"fuse_act_quant":true}}' \
     --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 \
     --override-generation-config '{"temperature":0.7,"top_p":0.95,"top_k":20}' \
     --chat-template /patches/qwen-fixed-v22.3.jinja >/dev/null
+  python3 "$REPO/scripts/lifecycle.py" record "$DATA" "$CONTAINER" "$PORT"
   echo "Loading (2-3 min warm; the first start compiles kernels and can take 10+ min)..."
   local t0=$SECONDS
   until curl -sf "localhost:$PORT/health" >/dev/null; do
@@ -195,6 +183,9 @@ cmd_start() {
     [ $((SECONDS - t0)) -lt 2400 ] || die "not ready after 40 min -- see: qwen38.sh logs"
     sleep 5
   done
+  local readiness=ready
+  [ "${QWEN38_WARMUP:-0}" = 1 ] && readiness=warmup-ready
+  python3 "$REPO/scripts/lifecycle.py" "$readiness" "$DATA" "$CONTAINER" "$PORT"
   echo "Ready in $((SECONDS - t0)) s."
   cmd_status
 }
@@ -215,9 +206,8 @@ print("endpoint:  http://localhost:%s/v1  model=%s  context=%s tokens"
 }
 
 cmd_stop() {
-  docker stop -t 30 "$CONTAINER" >/dev/null 2>&1 || true
-  docker rm "$CONTAINER" >/dev/null 2>&1 || true
-  ok "stopped"
+  python3 "$REPO/scripts/lifecycle.py" stop "$DATA" "$CONTAINER" "$PORT"
+  ok "clean shutdown acknowledged"
 }
 
 case "${1:-}" in

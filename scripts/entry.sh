@@ -3,7 +3,7 @@
 # W4A8 GEMM kernel for gfx1201, swaps in the pinned libr4d, then hands off to vLLM through
 # available_memory.py (which sizes --gpu-memory-utilization from free VRAM at startup).
 # /patches = radiance checkout (pinned + patches/radiance-wsl-r9700.patch), /r4d = libr4d build.
-set -e
+set -euo pipefail
 SP=/opt/vllm/lib/python3.12/site-packages
 cd /patches
 python3 patch_quark_mxfp4.py
@@ -28,16 +28,17 @@ python3 patch_ar_geometry.py
 python3 patch_ar_qbits.py
 python3 patch_ar_3rank.py
 python3 patch_gdn_glue.py
-python3 patch_qwen3_thinkoff.py \
-  || echo "[radiance] WARNING: thinkoff patch did not apply; thinking-off requests will return empty content"
+python3 patch_qwen3_thinkoff.py
 # Lossless DFlash2 probabilistic drafting + block verification: fixes three upstream bugs (see the
 # file). Bind-mounted from this repo's patches/ by qwen38.sh start.
 python3 patch_dflash2_temperature.py
+python3 /release/patches/patch_quiesce.py
 cp mxfp4-configs/*.json "$SP"/aiter/ops/triton/configs/gemm/
 cp radiance_preamble.py /opt/radiance_preamble.py
 cp radiance_nvfp4.py radiance_mxfp4.py radiance_gdn.py radiance_gdn_lazy.py radiance_rmsquant.py \
    radiance_drafthead.py radiance_verifyhead.py radiance_gdnmerge.py radiance_aroverlap.py \
    radiance_topk.py radiance_arnq.py radiance_tp3pad.py "$SP"/
+python3 /release/patches/patch_startup_head.py "$SP/radiance_verifyhead.py"
 hipcc -O3 -w -std=c++17 -fPIC -shared --offload-arch=gfx1201 \
   $(python3 -m pybind11 --includes) radiance_mxfp4_fp8.hip -o "$SP"/radiance_mxfp4_fp8.so
 # The image's own libr4d predates the gated-delta-net overflow fix and NaNs this model.
@@ -46,4 +47,8 @@ cp /r4d/r4d.so "$SP"/r4d.so
 echo "[radiance] using pinned libr4d from /r4d"
 # Leave /patches before exec: a stale .so in the working directory would shadow site-packages.
 cd /
-exec python3 /patches/available_memory.py "$@"
+if [ "${QWEN38_BUILD_ONLY:-0}" = 1 ]; then
+  echo "[release] runtime compiled and patched; no GPU initialized"
+  exit 0
+fi
+exec python3 /release/scripts/available_memory.py "$@"
