@@ -7,3 +7,5 @@
 !scripts/
 !scripts/entry.sh
 !scripts/available_memory.py
+!kernels/
+!kernels/*.hip

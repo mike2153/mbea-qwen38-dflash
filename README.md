@@ -14,9 +14,24 @@ This release packages the pinned runtime into a Docker image, adds the validated
 | Context silently shrinks when memory is scarce | Normal startup requires at least 180,000 tokens |
 | Timed Docker stop can force-kill a worker | Authenticated scheduler pause, API drain and device acknowledgement precede SIGTERM; no kill escalation |
 
-Model weights, quantization, chat template, sampling defaults and the seven-token DFlash2 configuration are unchanged. Rejected kernel combinations, wider drafter history and unqualified tree verification are not enabled.
+Model weights, quantization, chat template, sampling defaults and the seven-token DFlash2 configuration are unchanged. Wider drafter history and unqualified tree verification are not enabled.
 
 Release qualification results will be recorded in [the release report](docs/RELEASE-2026-10.md). Earlier measurements and their methods remain in [BENCHMARKS.md](docs/BENCHMARKS.md).
+
+### Update 2026.10.1: two faster kernels
+
+The image now builds in two HIP kernels (`kernels/`) that replace the Gated DeltaNet verify update and the DFlash2 drafter attention with byte-exact equivalents.
+
+| 18 sampled requests, 34k–180k context | Before | Now |
+|---|---:|---:|
+| Thinking tokens | 89.0 tok/s | 93.1 tok/s |
+| Answer and tool tokens | 84.9 tok/s | 89.5 tok/s |
+| Combined | 87.4 tok/s | 91.7 tok/s (+4.9%) |
+| Combined at 100k+ context | 90.5 tok/s | 94.5 tok/s (+4.4%) |
+
+Prefill is excluded. All 18 greedy, 18 sampled and 4 coding responses were identical to the previous runtime. This was a short check; scope and limits are in the [changelog](CHANGELOG.md).
+
+To update an existing install, `git pull` and run `.\qwen38.ps1 install` again. It rebuilds the image and re-warms the compile cache.
 
 ## Requirements
 
@@ -56,7 +71,7 @@ The endpoint is [localhost:8080/v1](http://localhost:8080/v1), model `Qwen3.8-DF
 In WSL, run `bash scripts/qwen38.sh setup`, `start`, `status`, `validate` or `stop` as root. Building the Docker image itself needs no GPU access:
 
 ```bash
-docker build --network host -t mbea-qwen38-dflash:2026.10 .
+docker build --network host -t mbea-qwen38-dflash:2026.10.1 .
 ```
 
 The managed `qwen-server` installation is separate. These scripts do not replace its container. A container from an older release without a recorded lifecycle identity is not automatically adopted or removed.

@@ -14,6 +14,9 @@ import lifecycle
 spec = importlib.util.spec_from_file_location('head_patch', ROOT / 'patches/patch_startup_head.py')
 head = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(head)
+spec = importlib.util.spec_from_file_location('attn_patch', ROOT / 'patches/patch_drafter_attn.py')
+attn = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(attn)
 
 
 class ReleaseTests(unittest.TestCase):
@@ -53,6 +56,20 @@ class ReleaseTests(unittest.TestCase):
             path.write_text('unknown source\n')
             with self.assertRaises(RuntimeError):
                 head.patch(path)
+            self.assertEqual(path.read_text(), 'unknown source\n')
+
+    def test_drafter_attention_hook_idempotent_and_unknown_source_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'gpu_worker.py'
+            path.write_text('class Worker(object):\n    def load_model(self):\n        pass\n')
+            attn.patch(path)
+            once = path.read_bytes()
+            attn.patch(path)
+            self.assertEqual(path.read_bytes(), once)
+            compile(once, str(path), 'exec')
+            path.write_text('unknown source\n')
+            with self.assertRaises(RuntimeError):
+                attn.patch(path)
             self.assertEqual(path.read_text(), 'unknown source\n')
 
     def test_production_and_invalid_name_rejected(self):

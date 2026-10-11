@@ -24,7 +24,8 @@ DRAFT_REPO=tcclaviger/Qwen3.8-27B-DFlash2-FP8
 DRAFT_REV=ee0cb26a8279b7910cc28d82a8a3e15e4728d56f
 ROCDXG_DEB=https://github.com/ROCm/librocdxg/releases/download/v1.2.2/rocdxg-roct_1.2.2_amd64.deb
 
-RUNTIME_IMAGE=mbea-qwen38-dflash:2026.10
+RUNTIME_IMAGE=mbea-qwen38-dflash:2026.10.1
+WARM="$DATA/cache/.warm-${RUNTIME_IMAGE##*:}"   # per image: a new runtime recompiles on its first start
 
 SNAP=$MODELS/Qwen3.8-27B-MXFP4-official
 SRC=$MODELS/$MODEL_REPO
@@ -128,12 +129,12 @@ assert "gfx1201" in p.gcnArchName, "this build targets gfx1201 (R9700) only"
   step "9/9  first start (compiles Triton/inductor kernels into the cache, ~5-10 min)"
   # The compile run's autotuning buffers inflate vLLM's memory profile, so a cold start gets only
   # ~100k context instead of ~216k. Doing it once here means the user's first real start is warm.
-  if [ -f "$DATA/cache/.warm" ]; then
+  if [ -f "$WARM" ]; then
     ok "kernel cache already warm"
   elif [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = true ]; then
-    touch "$DATA/cache/.warm"; ok "server is running, so the cache is already warm"
+    touch "$WARM"; ok "server is running, so the cache is already warm"
   else
-    QWEN38_WARMUP=1 cmd_start && cmd_stop && touch "$DATA/cache/.warm"
+    QWEN38_WARMUP=1 cmd_start && cmd_stop && touch "$WARM"
   fi
 
   echo

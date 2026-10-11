@@ -1,0 +1,125 @@
+diff --git a/radiance_gdn.py b/radiance_gdn.py
+index cae5736..2075018 100644
+--- a/radiance_gdn.py
++++ b/radiance_gdn.py
+@@ -161,8 +161,38 @@ def _zero_tail(core_attn_out, T):
+ _FUSED_CNT = None
+ 
+ 
++# T02-M02 mode E (experiment fork, E002 / LEDGER L-038): our gdn_verify kernel replaces r4d's fused update with the
++# same 40 arguments (fp16 state only). Built at container start into site-packages/gdn_verify.so from
++# /engine/kernels/gdn_verify.hip. Its group barrier needs N*Hg self-resetting int32 counters instead of one.
++MODE_E = os.environ.get("RADIANCE_GDN_MODE_E", "0") == "1"
++_MODE_E = {"fn": None, "cnt": None}
++
++
++def _mode_e_fn():
++    if _MODE_E["fn"] is None:
++        import ctypes
++        import sysconfig
++        so = os.environ.get("RADIANCE_GDN_MODE_E_SO") or os.path.join(sysconfig.get_paths()["purelib"], "gdn_verify.so")
++        f = ctypes.CDLL(so).gdn_verify_w4k128v128_bf16_f16state
++        P, L, I, F = ctypes.c_void_p, ctypes.c_long, ctypes.c_int, ctypes.c_float
++        f.argtypes = [P, L, P, P, P, L, L, L, I, P, L, P, P,      # x .. cu
++                      I, I, I, I, I, I, I,                        # N H Hg K V width max_query_len
++                      P, P, P, P, P, L, I,                        # q k v a b ab_stride ab_is_bf16
++                      P, P, P, L, L, P, P, L,                     # A_log dt_bias state st_slot st_head o sidx sidx_stride
++                      F, F, P, I, P]                              # scale softplus_thr cnt o_rows stream
++        f.restype = I
++        _MODE_E["fn"] = f
++        # load the code object now: a first launch inside the FULL-graph capture crashed the WSL runtime (E002)
++        rc = ctypes.CDLL(so).gdn_verify_warmup()
++        sys.stderr.write(f"[radiance.gdn] mode E kernel loaded from {so} (warmup rc={rc})\n")
++    return _MODE_E["fn"]
++
++
+ def init_fused_counter():
+     global _FUSED_CNT, FUSED_UPDATE_ON
++    if MODE_E and _MODE_E["cnt"] is None:
++        _MODE_E["cnt"] = torch.zeros(8 * 16, dtype=torch.int32, device="cuda")  # N <= 8 sequences x 16 k-heads
++        _mode_e_fn()                                                            # load + warm before any capture
+     if FUSED_UPDATE_ON and _FUSED_CNT is None:
+         try:
+             _FUSED_CNT = torch.zeros(1, dtype=torch.int32, device="cuda")
+@@ -418,6 +448,23 @@ def fused_update(x, conv_w, conv_bias, conv_state, state_len_max, cache_idx, num
+     o_rows is the PADDED row count of the buffer o lives in (core_attn_out.shape[0]): the kernel
+     zeroes rows [cu[num_seqs], o_rows) so the caller may allocate that buffer uninitialized."""
+     dev, dt = x.device, torch.bfloat16
++    if MODE_E and ssm_state.dtype == torch.float16 and num_seqs <= 8:
++        rc = _mode_e_fn()(
++            x.data_ptr(), x.stride(0), conv_w.data_ptr(),
++            conv_bias.data_ptr() if conv_bias is not None else 0,
++            conv_state.data_ptr(), conv_state.stride(0), conv_state.stride(1), conv_state.stride(2),
++            state_len_max, cache_idx.data_ptr(), cache_idx.stride(0),
++            num_accepted.data_ptr() if num_accepted is not None else 0,
++            cu.data_ptr(), num_seqs, H, Hg, HEAD_K, HEAD_V, CONV_WIDTH, max_query_len,
++            0, 0, 0,                                     # q/k/v scratch: unused by mode E
++            a.data_ptr(), b.data_ptr(), a.stride(0), int(a.dtype == torch.bfloat16),
++            A_log.data_ptr(), dt_bias.data_ptr(),
++            ssm_state.data_ptr(), ssm_state.stride(0), ssm_state.stride(1),
++            o.data_ptr(), sidx.data_ptr(), sidx.stride(0),
++            float(scale), float(SOFTPLUS_THRESHOLD), _MODE_E["cnt"].data_ptr(), int(o_rows), _stream())
++        if rc != 0:
++            raise RuntimeError(f"radiance_gdn mode E launcher rejected the call: {rc}")
++        return
+     q = torch.empty((T, Hg, HEAD_K), device=dev, dtype=dt)
+     k = torch.empty((T, Hg, HEAD_K), device=dev, dtype=dt)
+     v = torch.empty((T, H, HEAD_V), device=dev, dtype=dt)
+@@ -597,19 +644,33 @@ def _plan(self, mixed_qkv, b, a, core_attn_out):
+ 
+ def forward_core_fused(self, mixed_qkv, b, a, core_attn_out) -> bool:
+     """Handle this step entirely in R4D, or return False and leave it to the original path."""
++    # RADIANCE_GDN_NOFILL (patch_gdn_nofill.py): vLLM skipped core_attn_out.zero_(); do it here, before any kernel,
++    # on every path except the fused decode update, which writes rows [0, cu[N]) and zeroes the pad rows itself.
++    pending = getattr(self, "_rad_pending_zero", False)
++    if pending:
++        self._rad_pending_zero = False
+     if not ALL or _r4d is None:
++        if pending:
++            core_attn_out.zero_()
+         return False
+     try:
+         plan = _plan(self, mixed_qkv, b, a, core_attn_out)
+     except Exception as e:                            # an unexpected metadata shape is a fallback
++        if pending:
++            core_attn_out.zero_()
+         if LAZY:
+             raise
+         return _fb(f"{type(e).__name__} while planning: {e}")
+     if plan is None:
++        if pending:
++            core_attn_out.zero_()
+         return False
+ 
+     kind, T, conv_state, ssm_state, md, (sidx, cu) = plan
+     H = self.num_v_heads // self.tp_size
++    if pending and not (kind == "decode" and not LAZY and FUSED_UPDATE_ON
++                        and md.num_spec_decodes * H <= FUSED_MAX_ITEMS):
++        core_attn_out.zero_()
+     Hg = self.num_k_heads // self.tp_size
+     conv_w = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
+     A_log, dt_bias = _gate_params(self)
+diff --git a/radiance_gdnmerge.py b/radiance_gdnmerge.py
+index d67921e..f001610 100644
+--- a/radiance_gdnmerge.py
++++ b/radiance_gdnmerge.py
+@@ -37,6 +37,9 @@ patch_gdn_merge_inproj.py installs that call site.
+ import os
+ import sys
+ 
++# patch_gdn_nofill.py (experiment fork, LEDGER L-034): z is read in place, vLLM's z_out copy is skipped
++_NOFILL = os.environ.get("RADIANCE_GDN_NOFILL", "0") == "1"
++
+ ENABLED = os.environ.get("RADIANCE_GDN_MERGE_INPROJ", "0") == "1"
+ 
+ 
+@@ -93,6 +96,9 @@ def _merged_forward_hip(self, hidden_states):
+         projected_states_qkvz, projected_states_ba, z, core_attn_out,
+         layer_name=self._rad_layer_name, use_aiter=True)
+ 
++    if _NOFILL:  # patch_gdn_nofill.py skipped z_out[:] = z: read z where the in_proj wrote it (row stride 16480)
++        hv = self.num_v_heads // self.tp_size * self.head_v_dim
++        z = projected_states_qkvz[:, self._rad_n1 - hv: self._rad_n1].view(z.shape)
+     return self._output_projection(core_attn_out, z)
+ 
+ 

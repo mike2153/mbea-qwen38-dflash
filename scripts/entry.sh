@@ -33,6 +33,9 @@ python3 patch_qwen3_thinkoff.py
 # file). Bind-mounted from this repo's patches/ by qwen38.sh start.
 python3 patch_dflash2_temperature.py
 python3 /release/patches/patch_quiesce.py
+# Byte-exact GDN verify and drafter attention kernels (kernels/); switched on by the image's ENV.
+python3 /release/patches/patch_gdn_nofill.py
+python3 /release/patches/patch_drafter_attn.py
 cp mxfp4-configs/*.json "$SP"/aiter/ops/triton/configs/gemm/
 cp radiance_preamble.py /opt/radiance_preamble.py
 cp radiance_nvfp4.py radiance_mxfp4.py radiance_gdn.py radiance_gdn_lazy.py radiance_rmsquant.py \
@@ -41,6 +44,10 @@ cp radiance_nvfp4.py radiance_mxfp4.py radiance_gdn.py radiance_gdn_lazy.py radi
 python3 /release/patches/patch_startup_head.py "$SP/radiance_verifyhead.py"
 hipcc -O3 -w -std=c++17 -fPIC -shared --offload-arch=gfx1201 \
   $(python3 -m pybind11 --includes) radiance_mxfp4_fp8.hip -o "$SP"/radiance_mxfp4_fp8.so
+hipcc -O3 -std=c++17 --offload-arch=gfx1201 -shared -fPIC -ffp-contract=off \
+  /release/kernels/gdn_verify.hip -o "$SP"/gdn_verify.so
+hipcc -O3 -std=c++17 --offload-arch=gfx1201 -shared -fPIC \
+  /release/kernels/drafter_attn.hip -o "$SP"/drafter_attn.so
 # The image's own libr4d predates the gated-delta-net overflow fix and NaNs this model.
 [ -f /r4d/r4d.so ] || { echo "[radiance] ERROR: /r4d/r4d.so missing -- run setup first" >&2; exit 1; }
 cp /r4d/r4d.so "$SP"/r4d.so

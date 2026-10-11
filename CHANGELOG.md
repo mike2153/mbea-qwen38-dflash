@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-11 — GDN and drafter attention kernels (image 2026.10.1)
+
+- Enable two HIP kernels, compiled into the image, that replace the Gated DeltaNet verify update and the DFlash2 drafter attention with byte-exact equivalents. Sources are in `kernels/`; their comments cite development notes that are not part of this repository.
+- Measured on one R9700 against the previous runtime, same requests in the same session, prefill excluded: 87.4 → 91.7 tok/s over 18 sampled requests at 34k–180k context (+4.9%); thinking 89.0 → 93.1, answer and tool tokens 84.9 → 89.5; 90.5 → 94.5 at 100k+ (+4.4%).
+- All 18 greedy, 18 sampled and 4 coding responses were identical to the previous runtime. This was a shortened check: no one-hour workload and 4 of the usual 24 coding seeds. An earlier 78-response comparison of the same kernels had one differing sampled coding response; it did not reproduce in replays and its cause is unknown.
+- Name the warm-cache marker after the image tag, so `install` re-warms the compile cache after an update. The first start with a new runtime recompiles the target graph and fits roughly half the usual context until the next start.
+
 ## 2026-10-11 — qualified runtime package
 
 - Add a reproducible Dockerfile using the existing pinned vLLM-radiance image, radiance revision and libr4d revision. Compile and apply patches during image construction instead of at each start.
