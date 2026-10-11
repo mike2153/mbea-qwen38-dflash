@@ -67,6 +67,18 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 lifecycle.inspect('exp-test')
 
+    def test_absent_container_cli_variants_and_daemon_failures(self):
+        for text in ('[]\nerror: no such object: exp-test\n',
+                     '[]\nError: No such object: exp-test\n',
+                     'Error response from daemon: No such container: exp-test\n'):
+            with self.subTest(text=text), patch.object(lifecycle, 'docker', return_value=(1, text)):
+                self.assertIsNone(lifecycle.inspect('exp-test'))
+        for text in ('Cannot connect to the Docker daemon', 'permission denied',
+                     'Error: No such object: exp-another'):
+            with self.subTest(text=text), patch.object(lifecycle, 'docker', return_value=(1, text)):
+                with self.assertRaises(RuntimeError):
+                    lifecycle.inspect('exp-test')
+
     def test_corrupted_lifecycle_pointer_cannot_escape_data_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

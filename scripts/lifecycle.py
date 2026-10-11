@@ -28,7 +28,8 @@ def validate(name, port):
 def inspect(name):
     rc, text = docker('inspect', name)
     if rc:
-        if 'No such object' in text or 'No such container' in text:
+        missing = r'(?im)^(?:error(?: response from daemon)?: )?no such (?:object|container): ' + re.escape(name) + r'\s*$'
+        if re.search(missing, text):
             return None
         raise RuntimeError('Docker inspection failed; no lifecycle action taken')
     value = json.loads(text)[0]

@@ -7,7 +7,7 @@
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-DATA=${QWEN38_DATA:-/root/qwen38-dflash}       # radiance checkout, libr4d build, compile caches
+DATA=${QWEN38_DATA:-/root/qwen38-dflash}       # compile caches and private lifecycle records
 MODELS=${MODELS:-/root/models}
 PORT=${PORT:-8080}
 CONTAINER=${CONTAINER:-qwen38-dflash}
@@ -76,7 +76,7 @@ cmd_setup() {
     apt-get install -y -q git curl python3 docker.io
   fi
   docker info >/dev/null 2>&1 || systemctl enable --now docker 2>/dev/null || service docker start
-  docker info >/dev/null 2>&1 || die "docker is installed but not running" "enable systemd in /etc/wsl.conf, then wsl --shutdown"
+  docker info >/dev/null 2>&1 || die "docker is installed but not running" "start the Docker service before retrying; this installer does not reset WSL"
   ok "docker $(docker version --format '{{.Server.Version}}')"
 
   step "3/9  ROCDXG (ROCm <-> WSL GPU bridge)"
