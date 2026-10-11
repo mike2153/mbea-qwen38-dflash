@@ -67,6 +67,13 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 lifecycle.inspect('exp-test')
 
+    def test_corrupted_lifecycle_pointer_cannot_escape_data_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'active.json').write_text(json.dumps({'run': '../outside'}))
+            with self.assertRaises(RuntimeError):
+                lifecycle.active(root)
+
     def test_secret_and_boot_evidence_not_overwritten(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(lifecycle, 'inspect', return_value=None):
             root = Path(tmp)
@@ -76,6 +83,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertNotEqual(first, second)
             self.assertEqual(first.read_bytes(), before)
             self.assertEqual(first.stat().st_mode & 0o777, 0o600)
+            self.assertEqual((first.parent / 'control.json').stat().st_mode & 0o777, 0o600)
 
     def test_wrong_container_identity_never_signalled(self):
         with patch.object(lifecycle, 'inspect', return_value={'Id': 'a' * 64}), \

@@ -1,6 +1,7 @@
 """Authenticated experiment drain client. HTTP timeouts never signal or kill a worker."""
 import datetime
 import json
+import os
 import re
 import time
 import urllib.error
@@ -17,6 +18,7 @@ def save(path, data):
     path = Path(path)
     tmp = path.with_suffix(path.suffix + '.tmp')
     tmp.write_text(json.dumps(data, indent=2), encoding='utf-8')
+    os.chmod(tmp, 0o600)
     tmp.replace(path)
 
 

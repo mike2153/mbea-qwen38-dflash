@@ -41,7 +41,12 @@ def active(root):
     pointer = root / 'active.json'
     if not pointer.exists():
         raise RuntimeError('Lifecycle identity missing; container preserved')
-    run = root / json.loads(pointer.read_text())['run']
+    name = json.loads(pointer.read_text())['run']
+    if not isinstance(name, str) or not re.fullmatch(r'[0-9]{8}-[0-9]{6}-[0-9a-f]{8}', name):
+        raise RuntimeError('Invalid lifecycle directory; container preserved')
+    run = root / name
+    if run.resolve().parent != root.resolve():
+        raise RuntimeError('Lifecycle directory escapes the installation; container preserved')
     return run, json.loads((run / 'control.json').read_text())
 
 
