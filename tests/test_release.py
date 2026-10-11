@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -30,6 +30,16 @@ class ReleaseTests(unittest.TestCase):
                        {'overhead': float('inf')}, {'reserve': -1}):
             with self.assertRaises(ValueError):
                 memory.memory_fraction(31 * memory.GIB, 32 * memory.GIB, **kwargs)
+
+    def test_budget_refusal_synchronizes_without_starting_a_worker(self):
+        torch = Mock()
+        torch.cuda.mem_get_info.return_value = (29 * memory.GIB, 32 * memory.GIB)
+        torch.cuda.is_initialized.return_value = True
+        with patch.dict(sys.modules, {'torch': torch}), patch.dict(memory.os.environ, {}, clear=True), \
+                patch.object(memory.os, 'execv') as launch, patch('builtins.print'):
+            memory.main()
+        torch.cuda.synchronize.assert_called_once()
+        launch.assert_not_called()
 
     def test_head_patch_idempotent_and_unknown_source_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -5,13 +5,14 @@
 .EXAMPLE
   .\qwen38.ps1 install        # one-time: WSL Ubuntu, Docker, ROCDXG, image, models, kernels
   .\qwen38.ps1 start          # OpenAI-compatible server on http://localhost:8080/v1
-  .\qwen38.ps1 start -Long    # leave 1.0 GiB for Windows instead of 1.5 -> ~260k context
+  .\qwen38.ps1 start -Long    # budget 0.5 GiB Windows reserve instead of 1.0
+  .\qwen38.ps1 validate      # API, reasoning, streaming, tools and context checks
   .\qwen38.ps1 bench          # prefill / decode / draft-acceptance benchmark
   .\qwen38.ps1 status | logs | stop
 #>
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('install', 'start', 'stop', 'status', 'logs', 'bench', 'help')]
+    [ValidateSet('install', 'start', 'stop', 'status', 'logs', 'bench', 'validate', 'help')]
     [string]$Command = 'help',
     [string]$Distro,
     [switch]$Long

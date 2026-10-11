@@ -1,217 +1,129 @@
 # mbea-qwen38-dflash
 
-**Qwen3.8-27B at 125–134 tokens/s on short coding prompts (~85–95 tokens/s on long-context agent work) with up to 260k context on a single AMD Radeon AI PRO R9700, running on Windows.**
+Qwen3.8-27B with DFlash2 on one AMD Radeon AI PRO R9700 (32 GB), under Windows 11 and WSL2. The server provides an OpenAI-compatible API with streaming, reasoning and tool calls. It keeps the proven probabilistic drafting and block-verification settings.
 
-A tuned, reproducible vLLM serving setup for one R9700 (RDNA4, gfx1201, 32 GB) under Windows 11 + WSL2. It uses AMD's official MXFP4 checkpoint, a DFlash2 speculative drafter and the RDNA4 kernels from [radiance](https://codeberg.org/ggz14/radiance-vllm-mxfp4). One command installs everything, one starts an OpenAI-compatible server.
+This release packages the pinned runtime into a Docker image, adds the validated startup memory repair, and requires an acknowledged GPU drain before shutdown. The experimental native engine is documented [separately](docs/NATIVE_ENGINE.md); its speed figures are not measurements of this HTTP container.
 
-![GPU](https://img.shields.io/badge/GPU-Radeon%20AI%20PRO%20R9700-ED1C24)
-![OS](https://img.shields.io/badge/Windows%2011-WSL2-0078D4)
-![Engine](https://img.shields.io/badge/vLLM-radiance%200.9.3-6E40C9)
-![Decode](https://img.shields.io/badge/decode-125--134%20tok%2Fs-2EA44F)
-![Context](https://img.shields.io/badge/context-216k%20%E2%80%93%20260k-2EA44F)
+## What changed
 
-![Demo: start, a real-time streamed Rust answer, and the benchmark](docs/demo.gif)
-
-<sub>Real output from one R9700. The code stream plays at its recorded speed (548 tokens, 170 tok/s; short answers with reasoning off decode faster than the long benchmark runs). The 166 s model load and the 5-minute benchmark are skipped. The generated code compiles and passes its own 3 tests.</sub>
-
----
-
-## Performance
-
-Measured on one R9700 32 GB, Ryzen 9 9950X, 96 GB RAM, Windows 11 + WSL2, AMD Software PRO 26.7.1.
-Every number is a median of repeated runs on the shipped profile; method and raw tables in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
-
-| | Result |
+| Before | This release |
 |---|---|
-| **Decode, greedy** | **125–134 tok/s** (medians of three separate starts) |
-| **Decode, sampled** (temp 0.7, top-p 0.95) | **127.6 tok/s** with lossless probabilistic drafting (was 117–126 with greedy drafts) |
-| **Prefill, 1.9k-token prompt** | **2,750–2,970 tok/s**, time to first token 0.66–0.70 s |
-| **Prefill, long prompts** | 32k in 10.9 s · 98k in 41 s · 164k in 83 s · 258k in 164 s |
-| **Decode deep in context** | 165 tok/s at 32k · 136 at 98k · 145 at 164k · 115 at 258k on short fact-retrieval answers. Long reasoning-heavy agent turns run slower: see [real agent work](#speed-on-real-long-context-agent-work) |
-| **Context window** | ~216k tokens by default · **~260k with `-Long`** (the model's 262k limit) |
-| **Draft acceptance** | 59–63 % of drafted tokens · 5.1–5.4 tokens per verify step |
-| **Long-context recall** | 8/8 facts retrieved from a 257,768-token prompt |
-| **Coding quality** | 10 of 12 runs pass all 46 tests on a 1.9k-token Rust spec |
-| **Load time** | ~2.5–3 min (the one-time kernel compile is done during `install`) |
+| Patch and compile the runtime at each start | Build the runtime image during installation; reuse it at startup |
+| Startup head check creates a 2.37 GiB temporary | Equivalent zero-weight check uses about 10.5 KiB of scratch |
+| Memory budget omits runtime overhead | Budget includes 2.2 GiB overhead and an explicit Windows reserve |
+| Context silently shrinks when memory is scarce | Normal startup requires at least 180,000 tokens |
+| Timed Docker stop can force-kill a worker | Authenticated scheduler pause, API drain and device acknowledgement precede SIGTERM; no kill escalation |
 
-A clean install from this repository, then `.\qwen38.ps1 bench`, reproduced the setup on the same box (2026-10-08):
+Model weights, quantization, chat template, sampling defaults and the seven-token DFlash2 configuration are unchanged. Rejected kernel combinations, wider drafter history and unqualified tree verification are not enabled.
 
-| Test | Prompt tokens | Prefill tok/s | TTFT s | Decode tok/s | Draft acceptance |
-|---|---:|---:|---:|---:|---:|
-| Coding task, greedy (x3) | 1,920 | 2,744 | 0.70 | 125.3 | 61.9% |
-| Coding task, sampled (x3) | 1,921 | 2,757 | 0.70 | 116.7 | 58.2% |
-| Long prompt (~32k) | 34,741 | 2,762 | 12.58 | 138.4 | - |
-
-After switching to lossless probabilistic drafting (2026-10-09, same box, `bench` against the running server):
-
-| Test | Prompt tokens | Decode tok/s | Draft acceptance |
-|---|---:|---:|---:|
-| Coding task, greedy (x3) | 1,922 | 125.7 | 58.3% |
-| Coding task, sampled (x3) | 1,925 | 127.6 | 61.5% |
-| Long prompt (~32k) | 34,747 | 126.6 | - |
-
-Greedy (temperature 0) runs take exactly the same path as before, so only the sampled number moves. Prefill is unchanged.
-
-### Speed on real long-context agent work
-
-The numbers above use short, predictable prompts. A coding agent working in a large codebase is harder to predict: it reasons
-about big files at 30k–180k tokens of context, so fewer drafted tokens are accepted per step (~4 instead of ~5.3) and each step
-reads more KV cache. Measured with paired prompts (same prompt and seed on both configurations) from a private C++ codebase
-(36k–180k-token prompts) plus replayed coding-agent turns, 6 seeds:
-
-| | Greedy drafts (before) | Probabilistic drafts (now) | Change |
-|---|---:|---:|---:|
-| Decode, all prompts (75 pairs) | 86.7 tok/s | 91.4 tok/s | **+5.5 %** |
-| Decode, 140k+ context (10 pairs) | 73.8 tok/s | 80.7 tok/s | **+9 %** |
-| End-to-end agent codebase review (one run each) | 20.8 s per 1k tokens written | 17.2 s | **17 % faster** |
-| Coding quality, 24 seeds x 46 tests | 15 / 24 perfect | 18 / 24 | no loss (within noise) |
-
-Single sampled prompts swing by ±20 % because the generated text diverges, so only paired averages over many prompts are meaningful.
-
-For reference, the same model in a tuned llama.cpp build (IQ4_XS GGUF, MTP + n-gram speculation) decodes at 52–68 tok/s on this card. That was measured with a different prompt, so treat it as a rough comparison.
-
-### Where the speed comes from
-
-| Technique | Effect |
-|---|---|
-| **DFlash2 drafter** ([tcclaviger/Qwen3.8-27B-DFlash2-FP8](https://huggingface.co/tcclaviger/Qwen3.8-27B-DFlash2-FP8)) drafts 7 tokens per step | ~5.3 tokens accepted per forward pass of the 27B model |
-| **Draft re-ranking + dedicated verify head** (`RADIANCE_DRAFT_RERANK=80`, `RADIANCE_VERIFY_HEAD=1`) | +7 % decode, acceptance unchanged |
-| **Lossless probabilistic drafting + block verification** ([`patches/patch_dflash2_temperature.py`](patches/patch_dflash2_temperature.py)) | +5.5 % on long-context agent work, +9 % at 140k+. Fixes three upstream DFlash2 bugs that made probabilistic drafting unsafe (draft probabilities stored without temperature, draft noise sharing the resample's random stream, block verification reusing its random numbers across steps). Output distribution stays exactly the target model's |
-| **MXFP4 weights through a hand-written W4A8 GEMM** for gfx1201 | 4-bit weights without vLLM's emulation path |
-| **libr4d** FP8 paged attention + gated-delta-net kernels (pinned `b9e42ab` + rx9 narrow-state patch) | the stock kernel NaNs this model; this one is fast and correct |
-| **WSL pinned-memory fix** | host→device copies become async (a 4-byte copy cost ~17 ms before) |
-| **Free-VRAM budgeting at startup** | uses all VRAM Windows isn't holding, without paging through host memory |
-| **Vision tower skipped** (`language_model_only`) | ~1 GiB more KV cache |
-
----
+Release qualification results will be recorded in [the release report](docs/RELEASE-2026-10.md). Earlier measurements and their methods remain in [BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Requirements
 
-| | |
-|---|---|
-| **GPU** | AMD Radeon AI PRO R9700 (gfx1201). Other cards are not supported: the kernels are compiled for gfx1201 only |
-| **OS** | Windows 11 with WSL2 (`wsl --update` recommended) |
-| **Driver** | AMD Software: PRO Edition with WSL support (tested: 26.7.1) |
-| **Disk** | ~45 GB free for the WSL distro (19 GB model, 2 GB drafter, 14 GB image, caches) |
-| **RAM** | 32 GB minimum, 64 GB+ recommended (tested with 96 GB) |
-| **Network** | ~35 GB of downloads on first install |
+- AMD Radeon AI PRO R9700, gfx1201, 32 GB. This build targets that card.
+- Windows 11 with WSL2 and an AMD PRO driver supporting WSL. Tested with PRO 26.7.1.
+- At least 64 GB RAM recommended and approximately 65 GB free Linux disk space for models, images, build layers and caches.
+- Approximately 35 GB of initial downloads. Model downloads resume if interrupted.
 
-Nothing else needs to be preinstalled. The installer sets up Ubuntu 24.04, Docker and ROCDXG inside WSL. ROCDXG is AMD's bridge that lets ROCm reach the GPU from WSL. The full ROCm stack is not needed on the host because it ships inside the container.
+The installer uses Ubuntu, Docker and ROCDXG. Model weights are downloaded from their original repositories; they are not included in this repository or the runtime image.
 
-## Quick start
+## Install and start
 
-From PowerShell:
+Run in PowerShell:
 
 ```powershell
 git clone https://github.com/mike2153/mbea-qwen38-dflash
 cd mbea-qwen38-dflash
-.\qwen38.ps1 install      # one-time, ~30-60 min: ~35 GB of downloads + kernel builds
-.\qwen38.ps1 start        # ready on http://localhost:8080/v1
+.\qwen38.ps1 install
+.\qwen38.ps1 start
 ```
 
-If WSL isn't installed yet, `install` sets it up first. Create your Linux user when Ubuntu asks, then run `install` again.
+If Ubuntu needs installing, create its Linux user when prompted and run `install` again. If PowerShell blocks scripts, use `powershell -ExecutionPolicy Bypass -File .\qwen38.ps1 install`.
 
-> Running scripts blocked? Use `powershell -ExecutionPolicy Bypass -File .\qwen38.ps1 install`.
+The endpoint is [localhost:8080/v1](http://localhost:8080/v1), model `Qwen3.8-DFlash`.
 
-### Commands
-
-| Command | What it does |
+| Command | Purpose |
 |---|---|
-| `.\qwen38.ps1 install` | One-time setup. Safe to re-run: finished steps are skipped and downloads resume |
-| `.\qwen38.ps1 start` | Starts the server and waits until it's ready (~216k context) |
-| `.\qwen38.ps1 start -Long` | Leaves 1.0 GiB for Windows instead of 1.5 GiB. Gives ~260k context, but close browsers and other GPU apps first |
-| `.\qwen38.ps1 status` | Container state, endpoint and actual context window |
-| `.\qwen38.ps1 bench` | Measures prefill, decode and draft acceptance on your box (~5 min) |
-| `.\qwen38.ps1 logs` | Follows the server log |
-| `.\qwen38.ps1 stop` | Stops and removes the container. Models and caches stay |
+| `.\qwen38.ps1 install` | Download the pinned dependencies/models, build the image and warm compile caches |
+| `.\qwen38.ps1 start` | Start with a 1.0 GiB budgeted Windows reserve and require at least 180k context |
+| `.\qwen38.ps1 start -Long` | Budget a 0.5 GiB Windows reserve; actual context depends on available memory |
+| `.\qwen38.ps1 status` | Show container state and the actual context capacity |
+| `.\qwen38.ps1 validate` | Check health, context, streaming, reasoning, arithmetic, tools and request validation |
+| `.\qwen38.ps1 bench` | Run the included short-prompt performance benchmark |
+| `.\qwen38.ps1 logs` | Follow server logs |
+| `.\qwen38.ps1 stop` | Drain GPU work and remove the container only after a clean exit |
 
-Already in WSL? `scripts/qwen38.sh setup|start [--long]|stop|status|logs` does the same thing as root.
-
-## Using it
-
-It's a standard OpenAI-compatible endpoint. The model name is `Qwen3.8-DFlash`.
+In WSL, run `bash scripts/qwen38.sh setup`, `start`, `status`, `validate` or `stop` as root. Building the Docker image itself needs no GPU access:
 
 ```bash
-curl http://localhost:8080/v1/chat/completions -H "Content-Type: application/json" -d '{
-  "model": "Qwen3.8-DFlash",
-  "messages": [{"role": "user", "content": "Write a Rust function that reverses a linked list."}]
-}'
+docker build --network host -t mbea-qwen38-dflash:2026.10 .
 ```
 
-- **Reasoning** is on by default and is returned in `reasoning_content`. Turn it off per request with `"chat_template_kwargs": {"enable_thinking": false}`.
-- **Tool calls** work out of the box (`qwen3_coder` parser, auto tool choice), so agents such as Codex, opencode, Cline and Continue can use it as an OpenAI-compatible provider. Use base URL `http://localhost:8080/v1` and any API key.
-- **Defaults**: temperature 0.7, top-p 0.95, top-k 20. Requests can override them.
-- **One request at a time** (`--max-num-seqs 1`). This setup is tuned for a single fast agent, not many users at once.
+The managed `qwen-server` installation is separate. These scripts do not replace its container. A container from an older release without a recorded lifecycle identity is not automatically adopted or removed.
+
+## API
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen3.8-DFlash","messages":[{"role":"user","content":"Write a Rust function that reverses a linked list."}]}'
+```
+
+- Reasoning is enabled by default. This pinned API returns it in `reasoning`; it accepts the older `reasoning_content` message field too.
+- Set `"chat_template_kwargs":{"enable_thinking":false}` to disable thinking per request.
+- Tool calls use the `qwen3_coder` parser and automatic tool choice.
+- Defaults are temperature 0.7, top-p 0.95 and top-k 20; requests can override them.
+- The profile serves one sequence at a time. It is tuned for a single coding agent.
 
 ## Configuration
 
-Set these in WSL before `qwen38.sh`, or pass them through `wsl -u root -- env VAR=... bash scripts/qwen38.sh ...`:
+Set environment variables in WSL before running the shell script:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `VRAM_RESERVE_GIB` | `1.5` | VRAM left free for Windows. Lower means more context |
-| `VRAM_CAP` | `0.90` | Most of the card vLLM may take. `start -Long` sets 1.0 / 0.95 |
-| `PORT` | `8080` | Server port |
-| `MODELS` | `/root/models` | Where the checkpoints live in WSL |
-| `QWEN38_DATA` | `/root/qwen38-dflash` | Radiance checkout, libr4d build, compile caches |
-| `HF_TOKEN` | unset | Only needed if Hugging Face rate-limits you |
+| `VRAM_RESERVE_GIB` | `1.0` | Windows reserve after the separate runtime-overhead allowance; minimum 0.5 |
+| `VRAM_CAP` | `0.95` | Maximum fraction available to vLLM's budget |
+| `PORT` | `8080` | HTTP port |
+| `CONTAINER` | `qwen38-dflash` | Managed name; isolated tests may use `exp-*` |
+| `MODELS` | `/root/models` | Model checkpoints |
+| `QWEN38_DATA` | `/root/qwen38-dflash` | Compile caches and private lifecycle records |
+| `HF_TOKEN` | unset | Optional Hugging Face download token |
 
-The tuned engine settings live in [`config/dflash.env`](config/dflash.env), and the vLLM arguments are in `cmd_start` in [`scripts/qwen38.sh`](scripts/qwen38.sh).
+The budget refuses to trade away its configured reserve to fit the context floor. Readiness independently checks actual context. Close other GPU applications if there is insufficient memory. Compilation warm-up may temporarily fit less context; the installer sends no inference request during that warm-up.
 
-The context window is sized from free VRAM at each start. If Windows apps hold more VRAM, the window gets smaller. That's the trade for never paging through host memory, which drops decode to around 10 tok/s.
+The inference settings are in [dflash.env](config/dflash.env), the runtime build is in [Dockerfile](Dockerfile), and container arguments are in [qwen38.sh](scripts/qwen38.sh). All upstream image, runtime, kernel and model revisions are pinned.
 
-## What `install` does
+## Validation and measurements
 
-| Step | |
-|---|---|
-| 1. Host check | WSL2 GPU bridge (`/dev/dxg`) and free disk |
-| 2. Packages | `git`, `curl`, `python3`, `docker.io` inside Ubuntu |
-| 3. ROCDXG | [`rocdxg-roct` 1.2.2](https://github.com/ROCm/librocdxg/releases), which lets ROCm reach the GPU through WSL |
-| 4. Image | `stilldeadcode/vllm-radiance:0.9.3`, pinned by digest |
-| 5. GPU check | Confirms the container sees a gfx1201 GPU before downloading anything large |
-| 6. Runtime | Clones [radiance](https://codeberg.org/ggz14/radiance-vllm-mxfp4) at commit `7d9a15a` and applies [`patches/radiance-wsl-r9700.patch`](patches/radiance-wsl-r9700.patch) (WSL GPU detection, pinned memory, VRAM budgeting) |
-| 7. Models | [`amd/Qwen3.8-27B-Quark-AWQ-MXFP4`](https://huggingface.co/amd/Qwen3.8-27B-Quark-AWQ-MXFP4) and the DFlash2-FP8 drafter at pinned revisions, then a one-line config fix ([`scripts/fix_checkpoint.py`](scripts/fix_checkpoint.py)) instead of upstream's 15-minute re-quantisation |
-| 8. Kernels | Builds libr4d `b9e42ab` + the rx9 patch inside the image |
-| 9. First start | Starts and stops the server once to fill the Triton/inductor cache. A cold start's autotuning buffers inflate vLLM's memory profile and would cut the first window to ~100k tokens |
+The release gate compares the candidate with a fresh reference using 24 coding seeds, 46 external Rust tests per answer, greedy and sampled long-context prompts, API checks, a one-hour workload and clean lifecycle tests. Finite tests can establish that no regression was observed on that suite; they cannot prove unchanged intelligence on every possible task.
 
-Every version is pinned (image digest, git commits, Hugging Face revisions), so a fresh install reproduces the measured setup.
+The included CPU suite runs without a GPU:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+The included [API validator](bench/validate.py) writes aggregate checks without generated content. The full private coding-agent evaluation corpus and raw responses are not published.
+
+Historical short coding prompts measured about 125–134 tok/s, while harder long-context agent work ran around 70–95 tok/s. These are workload-dependent measurements, not a guaranteed floor. See the [benchmark history](docs/BENCHMARKS.md) and [release report](docs/RELEASE-2026-10.md) for the exact scope, context lengths, quality scores and startup timings. No 150 tok/s claim is made.
 
 ## Troubleshooting
 
-| Symptom | Fix |
+| Symptom | Action |
 |---|---|
-| `/dev/dxg is missing` | Install or update the AMD Windows driver, then run `wsl --update` and `wsl --shutdown` |
-| GPU check fails: `no GPU visible` | Run `wsl --shutdown` and retry. Make sure no other WSL distro or app holds the GPU exclusively |
-| `docker is installed but not running` | Enable systemd: add `[boot]` and `systemd=true` to `/etc/wsl.conf`, then run `wsl --shutdown` |
-| Container exits with `Insufficient free VRAM` | Close GPU-heavy apps (browsers, games) or move a second monitor to the iGPU |
-| Decode suddenly ~10 tok/s | VRAM spilled into shared memory. `stop`, free VRAM, then `start` without `-Long` |
-| Port 8080 already in use | `PORT=8090` (see Configuration) |
-| Want the disk space back | `.\qwen38.ps1 stop`, then in WSL `rm -rf /root/qwen38-dflash /root/models/*Qwen3.8*` and `docker rmi stilldeadcode/vllm-radiance:0.9.3` |
+| GPU bridge missing | Check the AMD WSL driver and update WSL; this installer does not reset or terminate WSL |
+| Insufficient VRAM | Close GPU-heavy applications and retry with the normal profile |
+| Context below 180k after compilation | The server stops cleanly; retry with the warmed cache |
+| Stop reports an unconfirmed drain | Keep the container and diagnostic files. No forced removal or automatic kill is attempted |
+| Container exits during startup | Read the retained logs before retrying |
+| Port already in use | Select a free port with `PORT=...` |
 
-## Repository layout
+A clean stop preserves models and caches. Lifecycle credentials and acknowledgements are stored privately under the data directory and should not be published.
 
-```
-qwen38.ps1                    Windows entry point (install / start / stop / status / logs / bench)
-scripts/qwen38.sh             everything that runs in WSL: setup and container lifecycle
-scripts/entry.sh              runs inside the container: patch chain, kernel build, launch
-scripts/fix_checkpoint.py     makes AMD's checkpoint loadable without rewriting weights
-config/dflash.env             the tuned engine profile
-patches/radiance-wsl-r9700.patch   local changes on top of the pinned radiance commit
-patches/patch_dflash2_temperature.py   lossless DFlash2 probabilistic drafting (applied at container start)
-bench/                        stdlib benchmark + the coding prompt used for the published numbers
-docs/BENCHMARKS.md            full measurements and method
-```
+## Credits and licenses
 
-## Credits
+This project packages [radiance-vllm-mxfp4](https://codeberg.org/ggz14/radiance-vllm-mxfp4), [vllm-radiance](https://codeberg.org/StillDeadcode/vllm-radiance), [libr4d](https://codeberg.org/StillDeadcode/libr4d), [vLLM](https://github.com/vllm-project/vllm) and [ROCDXG](https://github.com/ROCm/librocdxg). Thanks to their authors for the runtime and RDNA4 kernels.
 
-This repository is packaging and tuning. The hard parts are other people's work:
+The models are [AMD's Qwen3.8-27B MXFP4 checkpoint](https://huggingface.co/amd/Qwen3.8-27B-Quark-AWQ-MXFP4) and [tcclaviger's DFlash2 FP8 drafter](https://huggingface.co/tcclaviger/Qwen3.8-27B-DFlash2-FP8), based on [Qwen](https://huggingface.co/Qwen).
 
-- **[radiance-vllm-mxfp4](https://codeberg.org/ggz14/radiance-vllm-mxfp4)** (ggz14) and **[vllm-radiance](https://codeberg.org/StillDeadcode/vllm-radiance)** / **[libr4d](https://codeberg.org/StillDeadcode/libr4d)** (StillDeadcode): the RDNA4 vLLM stack, MXFP4 path, DFlash integration and kernels
-- **[AMD](https://huggingface.co/amd/Qwen3.8-27B-Quark-AWQ-MXFP4)**: the Quark MXFP4 checkpoint (Apache-2.0)
-- **[tcclaviger](https://huggingface.co/tcclaviger/Qwen3.8-27B-DFlash2-FP8)**: the DFlash2 FP8 drafter
-- **[Qwen](https://huggingface.co/Qwen)**: Qwen3.8
-- **[vLLM](https://github.com/vllm-project/vllm)** and **[ROCm/librocdxg](https://github.com/ROCm/librocdxg)**
-
-Nothing third-party is redistributed here. The installer fetches each component from its source under that component's own license. The scripts and patch in this repository are MIT ([LICENSE](LICENSE)).
-
-> **Status:** experimental, community-maintained, not affiliated with AMD, Qwen or the radiance authors. Tested on one machine. Reports from other R9700 owners are welcome as issues.
+Third-party dependencies are fetched from their sources under their own terms. This repository's scripts and patches are MIT licensed; see [LICENSE](LICENSE). Experimental, community-maintained, tested on one R9700; not affiliated with the upstream authors.

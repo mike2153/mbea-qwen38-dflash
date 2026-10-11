@@ -20,11 +20,19 @@ def memory_fraction(free, total, reserve=1.0 * GIB, overhead=2.2 * GIB,
 
 def main():
     import torch
-    reserve = float(os.environ.get('VRAM_RESERVE_GIB', '1.0')) * GIB
-    cap = float(os.environ.get('VRAM_CAP', '0.95'))
-    torch.cuda.init()
-    free, total = torch.cuda.mem_get_info(0)
-    fraction = memory_fraction(free, total, reserve=reserve, cap=cap)
+    try:
+        reserve = float(os.environ.get('VRAM_RESERVE_GIB', '1.0')) * GIB
+        cap = float(os.environ.get('VRAM_CAP', '0.95'))
+        torch.cuda.init()
+        free, total = torch.cuda.mem_get_info(0)
+        fraction = memory_fraction(free, total, reserve=reserve, cap=cap)
+    except ValueError as exc:
+        # No model worker exists. Complete initialization before a clean refusal.
+        # The launcher still returns failure because readiness was never reached.
+        if torch.cuda.is_initialized():
+            torch.cuda.synchronize()
+        print(f'[memory-budget] startup refused: {exc}', flush=True)
+        return
     args = sys.argv[1:]
     args[args.index('--gpu-memory-utilization') + 1] = str(fraction)
     print(f'[memory-budget] free={free/GIB:.2f} GiB total={total/GIB:.2f} GiB '

@@ -178,6 +178,7 @@ cmd_start() {
   until curl -sf "localhost:$PORT/health" >/dev/null; do
     if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" != true ]; then
       docker logs --tail 40 "$CONTAINER" >&2
+      python3 "$REPO/scripts/lifecycle.py" stop "$DATA" "$CONTAINER" "$PORT"
       die "the container exited during startup (log tail above)"
     fi
     [ $((SECONDS - t0)) -lt 2400 ] || die "not ready after 40 min -- see: qwen38.sh logs"
@@ -210,11 +211,17 @@ cmd_stop() {
   ok "clean shutdown acknowledged"
 }
 
+cmd_validate() {
+  python3 "$REPO/bench/validate.py" --base "http://127.0.0.1:$PORT" \
+    --out "$DATA/reports/api-$(date +%Y%m%d-%H%M%S).json"
+}
+
 case "${1:-}" in
   setup)  cmd_setup ;;
   start)  shift; cmd_start "$@" ;;
   stop)   cmd_stop ;;
   status) cmd_status ;;
+  validate) cmd_validate ;;
   logs)   docker logs -f --tail 200 "$CONTAINER" ;;
   *) sed -n '2,7p' "$0"; exit 2 ;;
 esac

@@ -46,8 +46,12 @@ def active(root):
 
 
 def prepare(root, name, port):
-    if inspect(name) is not None:
-        raise RuntimeError('Container already exists; stop it cleanly before starting again')
+    previous = inspect(name)
+    if previous is not None:
+        if previous['State']['Running']:
+            raise RuntimeError('Container already exists; stop it cleanly before starting again')
+        # Only this installation's recorded, clean exit may be removed. Bad exits remain.
+        stop(root, name)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     run = root / (time.strftime('%Y%m%d-%H%M%S') + '-' + secrets.token_hex(4))
     run.mkdir(mode=0o700)
